@@ -17,14 +17,18 @@
 | 📅 **日程扫描** | 每 30 分钟 (8-23点) | 扫描私聊+工作群 → AI 识别日程 → 创建日历事件 |
 | 📰 **干货收集** | 每天 9:00 | 扫描指定群聊 → AI 提炼干货 → 日报归档 |
 
-**数据全程本地处理，不上传任何第三方服务。**
+**数据提取全程本地处理。** AI 分析阶段，聊天摘要会发送到你配置的大模型 API（如 Claude、GPT），请确保你信任该服务商。
 
 ---
 
 ## 安装
 
 ```bash
-openclaw skills install github:laolin5564/wechat-assistant
+# 方法 1: 克隆到 OpenClaw skills 目录
+git clone https://github.com/laolin5564/wechat-assistant.git ~/.openclaw/skills/wechat-assistant
+
+# 方法 2: 克隆到 agents skills 目录
+git clone https://github.com/laolin5564/wechat-assistant.git ~/.agents/skills/wechat-assistant
 ```
 
 然后跟 Agent 说：
