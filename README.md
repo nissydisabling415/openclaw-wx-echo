@@ -1,6 +1,6 @@
 # 🦞 wechat-assistant
 
-**微信 AI 个人助手** — 自动从微信聊天中提取待办、日程、干货，推送到你的工作流。
+**OpenClaw Skill** — 微信 AI 个人助手，自动从微信聊天中提取待办、日程、干货，推送到 Discord。
 
 > ⚠️ **Alpha 半成品** — 核心链路已跑通，但未经大规模验证。
 > 欢迎龙虾们在使用过程中提 Issue、提 PR，一起把这个东西做完善。
@@ -9,219 +9,121 @@
 
 ## 它能干什么
 
-| 功能 | 数据源 | 输出 |
-|------|--------|------|
-| 📋 **待办提取** | 私聊对话 | "张三让你下午3点送文件" → Discord / 任何 webhook |
-| 📅 **日程扫描** | 私聊 + 工作群 | "周五开产品评审" → Apple Calendar / Google Calendar |
-| 📰 **干货收集** | 指定群聊 | AI 群里的工具推荐、技术分享 → 日报归档 |
+装完 Skill 后，跟你的 Agent 说 `帮我设置微信助手`，它会引导你完成配置。之后自动定时运行：
 
-**不依赖任何云服务**，数据全程本地处理。AI 分析部分可选（你可以只用 CLI 工具拿 JSON，自己处理）。
+| 功能 | 频率 | 做什么 |
+|------|------|--------|
+| 📋 **待办提取** | 每 30 分钟 | 扫描私聊 → AI 识别待办 → 推送 Discord |
+| 📅 **日程扫描** | 每 30 分钟 (8-23点) | 扫描私聊+工作群 → AI 识别日程 → 创建日历事件 |
+| 📰 **干货收集** | 每天 9:00 | 扫描指定群聊 → AI 提炼干货 → 日报归档 |
 
----
-
-## 设计思路
-
-### 为什么要做这个
-
-微信是中国人的工作通讯主力，但它**没有 API**。大量待办、约会、有价值的信息散落在聊天记录里，靠人脑记忆容易漏。
-
-微信 4.0 在本地用 SQLCipher 4 加密存储所有聊天记录。只要能解密，就能用程序读取。
-
-### 架构：两层分离
-
-```
-┌─────────────────────────────────────────┐
-│  Layer 2: AI Agent（可选）               │
-│  读 prompt 模板 → 调 CLI → 分析 JSON    │
-│  → 推送 Discord / Calendar / Webhook    │
-│  适配: OpenClaw / Claude Code / 任何 Agent │
-└─────────────────┬───────────────────────┘
-                  │ 调用 CLI，读 JSON stdout
-┌─────────────────▼───────────────────────┐
-│  Layer 1: 独立 CLI 工具                  │
-│  纯 Python，不依赖任何 AI 框架           │
-│  解密 → 同步 → 提取 → 输出 JSON         │
-└─────────────────────────────────────────┘
-```
-
-**Layer 1** 是独立的命令行工具，任何人都能用，不需要 AI。
-**Layer 2** 是 AI Agent 集成层，目前适配了 [OpenClaw](https://github.com/openclaw/openclaw)，但设计上可以接任何 Agent。
-
-### 数据流
-
-```
-微信进程
-    │
-    ├── 加密 DB (SQLCipher 4, AES-256-CBC, ~19GB)
-    │       │
-    │       ▼
-    │   find_all_keys_macos ──── sudo 扫进程内存 ──→ all_keys.json
-    │       │
-    │       ▼
-    │   decrypt_db.py ──── 首次全量解密 ──→ decrypted/*.db
-    │
-    └── WAL 文件 (预分配 4MB，30ms 级更新)
-            │
-            ▼
-        refresh_decrypt.py ──── mtime 检测 + WAL patch ──→ 更新 decrypted/*.db
-            │                   （增量，<1秒，cron 每次先跑）
-            ▼
-        collector.py --sync ──── 增量同步 ──→ collector.db (SQLite)
-            │
-            ├── extract_todos.py    → JSON (私聊待办)
-            ├── extract_calendar.py → JSON (日程事件)
-            └── extract_digest.py   → JSON (群聊干货)
-                    │
-                    ▼
-                AI Agent 分析 JSON → 推送到你的工作流
-```
-
-### 关键设计决策
-
-1. **解密后存标准 SQLite**，不依赖 SQLCipher 库（安装难、跨平台差）
-2. **WAL 增量解密**（来自 [bbingz/wechat-decrypt](https://github.com/bbingz/wechat-decrypt)）避免每次全量解密 19GB
-3. **CLI 输出 JSON 到 stdout**，不调 AI API — Agent 侧的事交给 Agent
-4. **HMAC 验证**在全量解密前校验密钥，微信重启后密钥失效能立即发现（exit code 2）
+**数据全程本地处理，不上传任何第三方服务。**
 
 ---
 
-## 快速开始
+## 安装
+
+```bash
+openclaw skills install github:laolin5564/wechat-assistant
+```
+
+然后跟 Agent 说：
+
+> 帮我设置微信助手
+
+Agent 会按 SKILL.md 中的 Setup 流程一步步引导你：编译工具 → 提取密钥 → 解密数据库 → 首次同步 → 创建 Discord 频道 → 注册定时任务。
 
 ### 环境要求
 
 - **macOS 13+**（ARM64 或 Intel）
-- **微信桌面版 4.0+**（正在运行）
-- **Python 3.10+**
+- **微信桌面版 4.0+** 正在运行
+- **Python 3.10+** + `pip3 install pycryptodome zstandard pyyaml`
 - **sudo 权限**（仅密钥提取需要）
-
-### 1. 安装依赖
-
-```bash
-pip3 install pycryptodome zstandard pyyaml
-```
-
-### 2. 编译密钥提取工具
-
-```bash
-cd scripts/decrypt
-cc -O2 -o find_all_keys_macos find_all_keys_macos.c -framework Foundation
-```
-
-### 3. 创建工作目录 + 配置
-
-```bash
-mkdir ~/wechat-assistant && cd ~/wechat-assistant
-cp /path/to/this/repo/config.example.yaml config.yaml
-```
-
-编辑 `config.yaml`：
-
-```yaml
-wechat:
-  # 微信数据库目录（在微信设置 → 文件管理中找路径）
-  db_dir: "~/Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files/你的WXID/db_storage"
-
-  # 你的微信 wxid
-  self_wxid: "wxid_xxxxxxxxxxxx"
-```
-
-### 4. 提取密钥（需要 sudo + 微信正在运行）
-
-```bash
-cd ~/wechat-assistant
-sudo /path/to/scripts/decrypt/find_all_keys_macos
-# 输出 all_keys.json 到当前目录
-```
-
-### 5. 首次全量解密
-
-```bash
-python3 /path/to/scripts/decrypt/decrypt_db.py --config config.yaml
-```
-
-> ⏱️ 首次解密取决于数据库大小，19GB 大约需要 2-5 分钟。
-
-### 6. 首次采集
-
-```bash
-# 自动发现所有群聊和私聊
-python3 /path/to/scripts/collector.py --config config.yaml --sync
-```
-
-### 7. 试一下提取
-
-```bash
-# 提取昨天的私聊待办数据
-python3 /path/to/scripts/extract_todos.py --config config.yaml --full
-
-# 提取昨天的群聊干货
-python3 /path/to/scripts/extract_digest.py --config config.yaml --groups "你的群ID@chatroom"
-
-# 提取日程相关对话
-python3 /path/to/scripts/extract_calendar.py --config config.yaml --full
-```
-
-输出是 JSON，你可以 `| python3 -m json.tool` 格式化看，也可以接到你自己的脚本/Agent 里。
-
-### 8. 设置定时刷新（关键！）
-
-微信持续产生新消息，你需要定期刷新：
-
-```bash
-# 增量解密（检测 WAL 变化，通常 <1 秒）
-python3 /path/to/scripts/refresh_decrypt.py --config config.yaml
-
-# 增量同步到 collector.db
-python3 /path/to/scripts/collector.py --config config.yaml --sync
-```
-
-可以用 crontab、launchd、或 AI Agent 的定时任务来自动跑。
 
 ---
 
-## CLI 参考
+## 工作原理
 
-### refresh_decrypt.py — 增量解密
+### 架构
 
-```bash
-python3 refresh_decrypt.py --config config.yaml          # 检测 WAL 变化，patch 新页面
-python3 refresh_decrypt.py --config config.yaml --full    # 强制全量解密
+```
+┌─────────────────────────────────────────────┐
+│  OpenClaw Agent                              │
+│                                              │
+│  cron 定时触发 → 读 prompt 模板              │
+│  → 调 CLI 拿 JSON → AI 分析                 │
+│  → 推送 Discord / 创建日历事件               │
+└──────────────────┬──────────────────────────┘
+                   │ exec: python3 scripts/...
+┌──────────────────▼──────────────────────────┐
+│  CLI 工具层（纯 Python，不调 AI API）         │
+│                                              │
+│  refresh_decrypt.py → collector.py → extract │
+│  解密 → 同步 → 提取 JSON 到 stdout           │
+└─────────────────────────────────────────────┘
 ```
 
-| 退出码 | 含义 |
+**关键设计：CLI 只负责数据提取（输出 JSON），AI 分析由 Agent 通过 prompt 模板驱动。**
+
+这意味着你可以：
+- 换 prompt 模板改变 AI 的分析方式，不用改代码
+- 写新的 extract 脚本扩展功能，prompt 模板跟着加就行
+- 不同的 Agent 模型分析同样的数据，对比效果
+
+### 数据流
+
+```
+微信进程 → 加密 DB + WAL
+                │
+    ① refresh_decrypt.py ── WAL mtime 检测 → 增量 patch（<1秒）
+                │
+    ② collector.py --sync ── 增量同步到 collector.db
+                │
+    ③ extract_*.py ── 提取 JSON 到 stdout
+                │
+    ④ Agent 读 JSON ── 按 prompt 模板分析 → 推送 Discord
+```
+
+每次 cron 触发，Agent 按 `prompts/*.md` 模板依次执行 ①②③④。
+
+### prompt 模板机制
+
+`prompts/` 目录下的 `.md` 文件是 cron agentTurn 的指令模板。Agent 注册 cron 时，把模板中的占位符替换为实际值：
+
+| 占位符 | 含义 |
 |--------|------|
-| 0 | 正常 |
-| 2 | 密钥验证失败（微信重启过，需重新提取密钥） |
+| `{{config_path}}` | config.yaml 绝对路径 |
+| `{{skill_dir}}` | skill 根目录路径 |
+| `{{thread_id}}` | Discord 子区 ID |
+| `{{groups}}` | 监控群 ID（逗号分隔） |
+| `{{ssh_host}}` | 微信所在机器的 SSH 地址（本机留空） |
+| `{{ssh_password}}` | SSH 密码 |
+| `{{obsidian_vault}}` | Obsidian vault 路径（可选） |
 
-### collector.py — 消息同步
+**想改 AI 分析逻辑？直接改 prompt 模板，不用动代码。**
 
-```bash
-python3 collector.py --config config.yaml --sync                         # 同步所有会话
-python3 collector.py --config config.yaml --sync --chatroom 123@chatroom # 同步单个群
-python3 collector.py --config config.yaml --discover                     # 手动发现新会话
-```
+---
 
-### extract_todos.py — 私聊待办
+## 增量解密：为什么不用每次全量解密 19GB
 
-```bash
-python3 extract_todos.py --config config.yaml         # 增量（最近 35 分钟）
-python3 extract_todos.py --config config.yaml --full   # 全量（昨天整天）
-```
+微信 4.0 用 SQLCipher 4 加密本地数据库（AES-256-CBC + HMAC-SHA512），总量约 19GB。
 
-### extract_calendar.py — 日程扫描
+全量解密一次要 2-5 分钟，每 30 分钟跑一次不现实。
 
-```bash
-python3 extract_calendar.py --config config.yaml         # 增量
-python3 extract_calendar.py --config config.yaml --full   # 全量
-```
+核心优化来自 [bbingz/wechat-decrypt](https://github.com/bbingz/wechat-decrypt/tree/feat/macos-support) 的 WAL 增量解密：
 
-### extract_digest.py — 群聊干货
+1. SQLite WAL 模式下，新消息写入 `.db-wal` 文件（预分配 4MB）
+2. `refresh_decrypt.py` 检测 WAL 的 **mtime** 变化（不能用 size，因为是预分配的）
+3. 只解密 WAL 中的新 frame（通过 salt 值校验有效性）→ patch 到已解密的 DB
+4. 一个 4MB WAL 解密+patch 约 **70ms**
 
-```bash
-python3 extract_digest.py --config config.yaml                                    # 默认所有监控群，昨天
-python3 extract_digest.py --config config.yaml --groups "123@chatroom,456@chatroom"
-python3 extract_digest.py --config config.yaml --date 2026-03-12
-```
+所以定时任务跑起来几乎无感知。
+
+### 密钥过期处理
+
+微信每次重启，进程内存中的密钥就变了。`refresh_decrypt.py` 在全量解密前会做 **HMAC 验证**：
+- 验证通过 → 正常解密
+- 验证失败 → exit code 2 + 告警，Agent 自动提醒你重新提取密钥
 
 ---
 
@@ -230,103 +132,68 @@ python3 extract_digest.py --config config.yaml --date 2026-03-12
 ```
 scripts/
   decrypt/
-    find_all_keys_macos.c    — 从微信进程内存提取 per-DB 加密密钥（macOS，C）
-    decrypt_db.py             — 全量解密所有加密数据库
+    find_all_keys_macos.c    — 从微信进程内存提取加密密钥（C，需 sudo）
+    decrypt_db.py             — 全量解密（首次设置用）
     config.py                 — YAML 配置加载器
-  refresh_decrypt.py          — 增量解密（WAL patch，定时任务用这个）
+  refresh_decrypt.py          — 增量解密（定时任务用，WAL patch）
   collector.py                — 消息增量同步到 collector.db
-  extract_todos.py            — 从私聊提取待办对话 → JSON
-  extract_calendar.py         — 从私聊+工作群提取日程 → JSON
-  extract_digest.py           — 从群聊提取消息 → JSON
+  extract_todos.py            — 私聊待办 → JSON
+  extract_calendar.py         — 日程对话 → JSON
+  extract_digest.py           — 群聊干货 → JSON
   requirements.txt            — Python 依赖
-prompts/                      — AI Agent prompt 模板（OpenClaw 适配）
+prompts/
+  todo-scan.md                — 待办扫描 cron prompt 模板
+  calendar-scan.md            — 日程扫描 cron prompt 模板
+  digest.md                   — 干货收集 cron prompt 模板
 config.example.yaml           — 配置模板
-SKILL.md                      — OpenClaw Skill 定义（Agent 集成用）
+SKILL.md                      — OpenClaw Skill 定义（Agent 读这个）
 ```
 
 ---
 
-## 已知限制 & 待解决
+## 已知限制
 
-这是个半成品，以下问题已知但尚未解决：
+### 🔴 阻塞性
 
-### 🔴 阻塞性问题
+- **微信重启后密钥失效** — 需要重新 `sudo find_all_keys_macos`，目前无自动化方案
+- **macOS Only** — 密钥提取只支持 macOS（Windows 需要不同的内存扫描）
+- **需要 sudo 或 Full Disk Access** — 读微信数据库目录需要权限
 
-- [ ] **微信重启后密钥失效** — 每次微信重启都需要重新 `sudo find_all_keys_macos`。尚无自动化方案（需要 sudo 权限）
-- [ ] **macOS Only** — 密钥提取工具目前只支持 macOS。Windows 版需要不同的内存扫描方式（参考 [bbingz/wechat-decrypt](https://github.com/bbingz/wechat-decrypt) 的 `find_all_keys.py`）
-- [ ] **需要 Full Disk Access 或 sudo** — 读微信数据库目录需要权限
+### 🟡 待验证
 
-### 🟡 需要验证
-
-- [ ] **refresh_decrypt.py 未在真实环境验证** — WAL patch 逻辑移植自 bbingz/wechat-decrypt 的 monitor_web.py，在 mock 数据上测试通过，但未在真实 19GB 微信数据上跑过
-- [ ] **collector.py 大量历史消息性能** — 首次同步时如果有几十万条消息，性能未测
-- [ ] **zstd 解压兼容性** — 微信消息内容使用 zstandard 压缩，不同版本可能有差异
+- **refresh_decrypt.py 未在真实环境跑过** — WAL patch 在 mock 数据上测试通过
+- **首次同步大量历史消息的性能** — 几十万条消息时未测
+- **不同微信版本的 DB 结构差异** — 列名可能不同（已处理 `create_time` vs `CreateTime`）
 
 ### 🟢 改进方向
 
-- [ ] Windows 支持（密钥提取 + 路径适配）
-- [ ] Docker 化（一键部署）
-- [ ] MCP Server 集成（让 Claude / ChatGPT 直接查微信消息）
-- [ ] Web UI（浏览器查看 collector.db 内容）
-- [ ] 更多 extract 脚本（群成员活跃度分析、关键词监控...）
-- [ ] 消息解密 streaming（类似 monitor_web.py 的实时推送模式）
+- Windows 支持
+- 更多 extract 脚本（群活跃度分析、关键词告警…）
+- MCP Server 集成
+- 密钥自动刷新
 
 ---
 
-## 技术细节
+## 参与共建
 
-### 微信 4.0 加密方案
+最需要帮助的方向：
 
-- **加密**: SQLCipher 4, AES-256-CBC + HMAC-SHA512
-- **KDF**: PBKDF2-HMAC-SHA512, 256,000 iterations
-- **页面**: 4096 bytes, reserve = 80 (IV 16 + HMAC 64)
-- **每个 DB 独立 salt 和 enc_key**
-- **密钥位置**: WCDB 缓存 raw key 在进程内存中，格式 `x'<64hex_enc_key><32hex_salt>'`
+1. **在你的机器上跑一遍** — 报告问题（不同微信版本、macOS 版本）
+2. **新的 prompt 模板** — 改变 AI 分析方式，提升提取质量
+3. **新的 extract 脚本** — 你想从微信里提取什么？写个脚本输出 JSON 就行
+4. **Windows 适配** — 密钥提取和路径处理
+5. **Bug 修复** — 代码 review 发现的问题
 
-### WAL 增量解密原理
-
-SQLite WAL 模式下，新写入先进 `.db-wal` 文件。微信的 WAL 是预分配固定大小（4MB），不能用文件大小检测变化，只能用 **mtime**。
-
-WAL 文件包含多个 frame（每个 frame = 24B header + 4096B 加密页面）。同一个 WAL 文件中可能混有上一轮遗留的旧 frame，通过 **WAL header 中的 salt 值**区分：只有 salt 匹配当前周期的 frame 才是有效的。
-
-`refresh_decrypt.py` 做的事：
-1. 检查每个加密 DB 的 `.db` 和 `.db-wal` 的 mtime
-2. 与上次刷新的 mtime 对比
-3. 主 DB 变了 → 全量解密（WAL checkpoint 发生过）
-4. 只有 WAL 变了 → 解密 WAL 中的有效 frame，patch 到已解密的 DB 文件
-5. 都没变 → 跳过
-
-一个 4MB WAL 的解密和 patch 大约 70ms。
+提 Issue 或直接 PR，代码风格不强求，能跑就行。
 
 ---
 
 ## 致谢
 
-核心解密逻辑基于 [bbingz/wechat-decrypt](https://github.com/bbingz/wechat-decrypt/tree/feat/macos-support)，包括：
+核心解密逻辑基于 [bbingz/wechat-decrypt](https://github.com/bbingz/wechat-decrypt/tree/feat/macos-support)：
 - 进程内存密钥提取（`find_all_keys_macos.c`）
 - SQLCipher 4 页面解密算法
 - WAL 增量解密和 salt 校验机制
-
-在此基础上，我们增加了：
-- 消息增量同步层（`collector.py`）
-- 结构化数据提取（`extract_*.py` 系列）
-- AI Agent 集成层（prompt 模板 + OpenClaw Skill）
-- HMAC 密钥验证（防止密钥过期时静默产出坏数据）
-- DB 过滤（只解密需要的 message/contact/session，跳过 media/emoticon 等）
-
----
-
-## 参与贡献
-
-这是个半成品，最需要帮助的方向：
-
-1. **在你的机器上跑一遍** — 报告遇到的问题（不同微信版本、不同 macOS 版本）
-2. **Windows 适配** — 密钥提取和路径处理
-3. **新的 extract 脚本** — 你想从微信聊天里提取什么？
-4. **其他 Agent 适配** — Claude Code MCP、ChatGPT Plugin、Dify...
-5. **性能优化** — 大数据量下的同步和提取性能
-
-提 Issue 描述问题，或直接 PR。代码风格不强求，能跑就行。
 
 ---
 
